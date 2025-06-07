@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YouTube Downloader</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background-color: #000000;
+      min-height: 100vh;
+      color: #e7e9ea;
+      line-height: 1.5;
+    }
+
+    .container {
+      max-width: 600px;
+      margin: 0 auto;
+      padding: 0;
+      min-height: 100vh;
+    }
+
+    .header {
+      position: sticky;
+      top: 0;
+      background: rgba(0, 0, 0, 0.8);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid #2f3336;
+      padding: 16px 24px;
+      z-index: 100;
+    }
+
+    .header h1 {
+      color: #e7e9ea;
+      font-size: 20px;
+      font-weight: 700;
+      margin: 0;
+    }
+
+    .header p {
+      color: #71767b;
+      font-size: 14px;
+      margin-top: 4px;
+      font-weight: 400;
+    }
+
+    .main-content {
+      padding: 0;
+    }
+
+    .download-form {
+      background: #000000;
+      border-bottom: 1px solid #2f3336;
+      padding: 24px;
+    }
+
+    .form-group {
+      margin-bottom: 20px;
+    }
+
+    .form-group label {
+      display: block;
+      margin-bottom: 8px;
+      font-weight: 600;
+      color: #e7e9ea;
+      font-size: 15px;
+    }
+
+    .form-group input {
+      width: 100%;
+      padding: 12px 16px;
+      border: 1px solid #2f3336;
+      border-radius: 4px;
+      font-size: 15px;
+      background: #000000;
+      color: #e7e9ea;
+      transition: border-color 0.2s ease;
+    }
+
+    .form-group input:focus {
+      outline: none;
+      border-color: #1d9bf0;
+    }
+
+    .form-group input::placeholder {
+      color: #71767b;
+    }
+
+    .btn {
+      background: #1d9bf0;
+      color: #ffffff;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 9999px;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background-color 0.2s ease;
+      width: 100%;
+      font-family: inherit;
+    }
+
+    .btn:hover:not(:disabled) {
+      background: #1a8cd8;
+    }
+
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .btn-secondary {
+      background: transparent;
+      color: #1d9bf0;
+      border: 1px solid #2f3336;
+      margin-top: 12px;
+    }
+
+    .btn-secondary:hover:not(:disabled) {
+      background: rgba(29, 155, 240, 0.1);
+    }
+
+    .btn-danger {
+      background: transparent;
+      color: #f4212e;
+      border: 1px solid #2f3336;
+      padding: 6px 16px;
+      font-size: 13px;
+      width: auto;
+      font-weight: 600;
+    }
+
+    .btn-danger:hover:not(:disabled) {
+      background: rgba(244, 33, 46, 0.1);
+      border-color: #f4212e;
+    }
+
+    .downloads-section {
+      background: #000000;
+    }
+
+    .section-header {
+      padding: 16px 24px;
+      border-bottom: 1px solid #2f3336;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      position: sticky;
+      top: 77px;
+      background: rgba(0, 0, 0, 0.8);
+      backdrop-filter: blur(12px);
+      z-index: 99;
+    }
+
+    .section-header h2 {
+      color: #e7e9ea;
+      font-size: 20px;
+      font-weight: 700;
+    }
+
+    .btn-refresh {
+      background: transparent;
+      color: #1d9bf0;
+      border: 1px solid #2f3336;
+      padding: 8px 16px;
+      border-radius: 9999px;
+      font-size: 13px;
+      font-weight: 600;
+      width: auto;
+    }
+
+    .btn-refresh:hover:not(:disabled) {
+      background: rgba(29, 155, 240, 0.1);
+    }
+
+    .downloads-list {
+      padding: 0;
+    }
+
+    .download-item {
+      border-bottom: 1px solid #2f3336;
+      padding: 16px 24px;
+      transition: background-color 0.2s ease;
+    }
+
+    .download-item:hover {
+      background-color: rgba(255, 255, 255, 0.03);
+    }
+
+    .download-item:last-child {
+      border-bottom: none;
+    }
+
+    .download-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 12px;
+      gap: 16px;
+    }
+
+    .download-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .download-info h3 {
+      color: #e7e9ea;
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 4px;
+      line-height: 1.3;
+    }
+
+    .download-info .url {
+      color: #71767b;
+      font-size: 13px;
+      word-break: break-all;
+      line-height: 1.4;
+    }
+
+    .download-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .status-badge {
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .status-queued {
+      background: rgba(255, 212, 0, 0.2);
+      color: #ffd400;
+    }
+
+    .status-downloading {
+      background: rgba(29, 155, 240, 0.2);
+      color: #1d9bf0;
+    }
+
+    .status-uploading {
+      background: rgba(0, 186, 124, 0.2);
+      color: #00ba7c;
+    }
+
+    .status-completed {
+      background: rgba(0, 186, 124, 0.2);
+      color: #00ba7c;
+    }
+
+    .status-error {
+      background: rgba(244, 33, 46, 0.2);
+      color: #f4212e;
+    }
+
+    .progress-bar {
+      width: 100%;
+      height: 4px;
+      background: #2f3336;
+      border-radius: 2px;
+      overflow: hidden;
+      margin: 12px 0;
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: #1d9bf0;
+      transition: width 0.3s ease;
+    }
+
+    .download-details {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 16px;
+      margin-top: 12px;
+    }
+
+    .detail-item {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .detail-label {
+      font-size: 11px;
+      color: #71767b;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .detail-value {
+      font-size: 13px;
+      color: #e7e9ea;
+      font-weight: 500;
+    }
+
+    .thumbnail {
+      width: 48px;
+      height: 36px;
+      object-fit: cover;
+      border-radius: 8px;
+      margin-right: 12px;
+      flex-shrink: 0;
+    }
+
+    .thumbnail-placeholder {
+      width: 48px;
+      height: 36px;
+      background: #2f3336;
+      border-radius: 8px;
+      margin-right: 12px;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      color: #71767b;
+    }
+
+    .thumbnail-placeholder:empty::before {
+      content: '🎬';
+    }
+
+    .download-media {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+
+    .download-links {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+
+    .download-link {
+      padding: 6px 12px;
+      background: transparent;
+      color: #1d9bf0;
+      text-decoration: none;
+      border: 1px solid #2f3336;
+      border-radius: 9999px;
+      font-size: 13px;
+      font-weight: 600;
+      transition: all 0.2s ease;
+    }
+
+    .download-link:hover {
+      background: rgba(29, 155, 240, 0.1);
+      border-color: #1d9bf0;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 40px 24px;
+      color: #71767b;
+    }
+
+    .spinner {
+      border: 2px solid #2f3336;
+      border-top: 2px solid #1d9bf0;
+      border-radius: 50%;
+      width: 20px;
+      height: 20px;
+      animation: spin 1s linear infinite;
+      margin: 0 auto 16px;
+    }
+
+    @keyframes spin {
+      0% {
+        transform: rotate(0deg);
+      }
+
+      100% {
+        transform: rotate(360deg);
+      }
+    }
+
+    .toast {
+      position: fixed;
+      top: 80px;
+      right: 16px;
+      max-width: 300px;
+      padding: 16px;
+      border-radius: 8px;
+      color: white;
+      font-weight: 500;
+      font-size: 14px;
+      z-index: 1000;
+      transform: translateX(400px);
+      transition: transform 0.3s ease;
+      border: 1px solid #2f3336;
+    }
+
+    .toast.show {
+      transform: translateX(0);
+    }
+
+    .toast.success {
+      background: rgba(0, 186, 124, 0.9);
+      border-color: #00ba7c;
+    }
+
+    .toast.error {
+      background: rgba(244, 33, 46, 0.9);
+      border-color: #f4212e;
+    }
+
+    .toast.info {
+      background: rgba(29, 155, 240, 0.9);
+      border-color: #1d9bf0;
+    }
+
+    .error-message {
+      margin-top: 12px;
+      padding: 12px;
+      background: rgba(244, 33, 46, 0.1);
+      color: #f4212e;
+      border-radius: 8px;
+      border: 1px solid rgba(244, 33, 46, 0.2);
+      font-size: 13px;
+    }
+
+    /* Responsive Design */
+    @media (max-width: 768px) {
+      .container {
+        max-width: 100%;
+      }
+
+      .header {
+        padding: 12px 16px;
+      }
+
+      .download-form {
+        padding: 16px;
+      }
+
+      .download-item {
+        padding: 16px;
+      }
+
+      .section-header {
+        padding: 12px 16px;
+      }
+
+      .download-details {
+        grid-template-columns: 1fr;
+        gap: 12px;
+      }
+
+      .download-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 12px;
+      }
+
+      .download-status {
+        align-self: stretch;
+        justify-content: space-between;
+      }
+
+      .thumbnail {
+        width: 40px;
+        height: 30px;
+        margin-right: 8px;
+      }
+
+      .toast {
+        right: 8px;
+        left: 8px;
+        max-width: none;
+        transform: translateY(-100px);
+      }
+
+      .toast.show {
+        transform: translateY(0);
+      }
+    }
+
+    @media (max-width: 480px) {
+      .header h1 {
+        font-size: 18px;
+      }
+
+      .section-header h2 {
+        font-size: 18px;
+      }
+
+      .download-form {
+        padding: 12px;
+      }
+
+      .download-item {
+        padding: 12px;
+      }
+
+      .section-header {
+        padding: 12px;
+      }
+    }
+
+    /* Dark scrollbar */
+    ::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: #000000;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: #2f3336;
+      border-radius: 3px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: #71767b;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>YouTube Downloader</h1>
+      <p>고품질 비디오를 다운로드하고 다양한 형식으로 인코딩하세요</p>
+    </div>
+
+    <div class="main-content">
+      <div class="download-form">
+        <form id="downloadForm">
+          <div class="form-group">
+            <label for="url">YouTube URL</label>
+            <input type="url" id="url" name="url" placeholder="https://www.youtube.com/watch?v=..." required>
+          </div>
+          <button type="submit" class="btn" id="downloadBtn">
+            <span id="downloadBtnText">다운로드 시작</span>
+          </button>
+        </form>
+        <button type="button" class="btn btn-secondary" id="scanBtn">
+          S3 스캔 및 인코딩
+        </button>
+      </div>
+
+      <div class="downloads-section">
+        <div class="section-header">
+          <h2>다운로드 목록</h2>
+          <button type="button" class="btn btn-refresh" id="refreshBtn">
+            새로고침
+          </button>
+        </div>
+        <div id="downloadsList" class="downloads-list">
+          <div class="loading">
+            <div class="spinner"></div>
+            <p>다운로드 목록을 불러오는 중...</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = window.location.origin;
+    let refreshInterval;
+
+    // Image cache for thumbnails (keyed by download_id instead of URL)
+    const thumbnailCache = new Map();
+
+    // Convert image URL to data URL for caching
+    async function getCachedThumbnail(downloadId, thumbnailUrl) {
+      if (!thumbnailUrl) return null;
+
+      if (thumbnailCache.has(downloadId)) {
+        return thumbnailCache.get(downloadId);
+      }
+
+      try {
+        const response = await fetch(thumbnailUrl);
+        if (!response.ok) throw new Error('Failed to fetch image');
+
+        const blob = await response.blob();
+
+        return new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const dataUrl = reader.result;
+            thumbnailCache.set(downloadId, dataUrl);
+            resolve(dataUrl);
+          };
+          reader.onerror = () => resolve(thumbnailUrl); // fallback to original URL
+          reader.readAsDataURL(blob);
+        });
+      } catch (error) {
+        console.warn('Failed to cache thumbnail:', error);
+        return thumbnailUrl; // fallback to original URL
+      }
+    }
+
+    // Toast notification
+    function showToast(message, type = 'info') {
+      const toast = document.createElement('div');
+      toast.className = `toast ${type}`;
+      toast.textContent = message;
+      document.body.appendChild(toast);
+
+      setTimeout(() => toast.classList.add('show'), 100);
+      setTimeout(() => {
+        toast.classList.remove('show');
+        setTimeout(() => document.body.removeChild(toast), 300);
+      }, 3000);
+    }
+
+    // Format file size
+    function formatFileSize(bytes) {
+      if (!bytes) return 'N/A';
+      const sizes = ['B', 'KB', 'MB', 'GB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(1024));
+      return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${sizes[i]}`;
+    }
+
+    // Format date
+    function formatDate(dateString) {
+      const date = new Date(dateString);
+      const now = new Date();
+      const diffMs = now - date;
+      const diffMins = Math.floor(diffMs / 60000);
+      const diffHours = Math.floor(diffMins / 60);
+      const diffDays = Math.floor(diffHours / 24);
+
+      if (diffMins < 1) return '방금';
+      if (diffMins < 60) return `${diffMins}분`;
+      if (diffHours < 24) return `${diffHours}시간`;
+      if (diffDays < 7) return `${diffDays}일`;
+
+      return date.toLocaleDateString('ko-KR', {
+        month: 'short',
+        day: 'numeric',
+        year: date.getFullYear() !== now.getFullYear() ? 'numeric' : undefined
+      });
+    }
+
+    // Start download
+    document.getElementById('downloadForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+
+      const url = document.getElementById('url').value;
+      const btn = document.getElementById('downloadBtn');
+      const btnText = document.getElementById('downloadBtnText');
+
+      btn.disabled = true;
+      btnText.textContent = '다운로드 중...';
+
+      try {
+        const response = await fetch(`${API_BASE}/download`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ url }),
+        });
+
+        if (response.ok) {
+          const result = await response.json();
+          showToast('다운로드가 시작되었습니다!', 'success');
+          document.getElementById('url').value = '';
+          loadDownloads();
+        } else {
+          throw new Error('다운로드 시작 실패');
+        }
+      } catch (error) {
+        showToast('다운로드 시작에 실패했습니다: ' + error.message, 'error');
+      } finally {
+        btn.disabled = false;
+        btnText.textContent = '다운로드 시작';
+      }
+    });
+
+    // Scan S3
+    document.getElementById('scanBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('scanBtn');
+      btn.disabled = true;
+      btn.textContent = '스캔 중...';
+
+      try {
+        const response = await fetch(`${API_BASE}/encode/scan`, {
+          method: 'POST',
+        });
+
+        if (response.ok) {
+          const result = await response.json();
+          showToast(`스캔 완료: ${result.queued_count}개 파일이 인코딩 대기열에 추가되었습니다`, 'success');
+          loadDownloads();
+        } else {
+          throw new Error('스캔 실패');
+        }
+      } catch (error) {
+        showToast('스캔에 실패했습니다: ' + error.message, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'S3 스캔 및 인코딩';
+      }
+    });
+
+    // Delete download
+    async function deleteDownload(downloadId) {
+      if (!confirm('정말로 이 다운로드를 삭제하시겠습니까?')) {
+        return;
+      }
+
+      try {
+        const response = await fetch(`${API_BASE}/downloads/${downloadId}`, {
+          method: 'DELETE',
+        });
+
+        if (response.ok) {
+          showToast('다운로드가 삭제되었습니다', 'success');
+          loadDownloads();
+        } else {
+          throw new Error('삭제 실패');
+        }
+      } catch (error) {
+        showToast('삭제에 실패했습니다: ' + error.message, 'error');
+      }
+    }
+
+    // Load downloads
+    async function loadDownloads() {
+      try {
+        const response = await fetch(`${API_BASE}/downloads`);
+        const data = await response.json();
+        await renderDownloads(data.downloads);
+      } catch (error) {
+        document.getElementById('downloadsList').innerHTML = `
+          <div class="loading">
+            <p>다운로드 목록을 불러오는데 실패했습니다: ${error.message}</p>
+          </div>
+        `;
+      }
+    }
+
+    // Render downloads
+    async function renderDownloads(downloads) {
+      const container = document.getElementById('downloadsList');
+
+      if (downloads.length === 0) {
+        container.innerHTML = `
+          <div class="loading">
+            <p>다운로드 내역이 없습니다</p>
+          </div>
+        `;
+        return;
+      }
+
+      // First render without thumbnails for fast display
+      container.innerHTML = downloads.map(download => `
+        <div class="download-item">
+          <div class="download-header">
+            <div class="download-info">
+              <div class="download-media">
+                <div class="thumbnail-placeholder" data-download-id="${download.download_id}" data-thumbnail-url="${download.thumbnail_url || ''}"></div>
+                <div>
+                  <h3>${download.title}</h3>
+                  <p class="url">${download.url}</p>
+                </div>
+              </div>
+            </div>
+            <div class="download-status">
+              <span class="status-badge status-${download.status}">${getStatusText(download.status)}</span>
+              ${download.encoding_status ? `<span class="status-badge status-${download.encoding_status}">${getEncodingStatusText(download.encoding_status)}</span>` : ''}
+              <button class="btn btn-danger" onclick="deleteDownload('${download.download_id}')">삭제</button>
+            </div>
+          </div>
+          
+          ${download.status === 'downloading' || download.status === 'uploading' ? `
+            <div class="progress-bar">
+              <div class="progress-fill" style="width: ${download.progress}%"></div>
+            </div>
+          ` : ''}
+          
+          <div class="download-details">
+            <div class="detail-item">
+              <span class="detail-label">등록</span>
+              <span class="detail-value">${formatDate(download.created_at)}</span>
+            </div>
+            <div class="detail-item">
+              <span class="detail-label">진행률</span>
+              <span class="detail-value">${download.progress.toFixed(1)}%</span>
+            </div>
+            ${download.file_size ? `
+              <div class="detail-item">
+                <span class="detail-label">크기</span>
+                <span class="detail-value">${formatFileSize(download.file_size)}</span>
+              </div>
+            ` : ''}
+            ${download.speed ? `
+              <div class="detail-item">
+                <span class="detail-label">속도</span>
+                <span class="detail-value">${download.speed}</span>
+              </div>
+            ` : ''}
+            ${download.eta ? `
+              <div class="detail-item">
+                <span class="detail-label">예상</span>
+                <span class="detail-value">${download.eta}</span>
+              </div>
+            ` : ''}
+          </div>
+          
+          ${download.error ? `
+            <div class="error-message">
+              <strong>오류:</strong> ${download.error}
+            </div>
+          ` : ''}
+          
+          ${(download.aac_url || download.webm_url || download.original_video_url) ? `
+            <div class="download-links">
+              ${download.original_video_url ? `<a href="${download.original_video_url}" class="download-link" download>원본</a>` : ''}
+              ${download.aac_url ? `<a href="${download.aac_url}" class="download-link" download>오디오 (AAC)</a>` : ''}
+              ${download.webm_url ? `<a href="${download.webm_url}" class="download-link" download>비디오 (WebM)</a>` : ''}
+            </div>
+          ` : ''}
+        </div>
+      `).join('');
+
+      // Then load thumbnails asynchronously
+      const placeholders = container.querySelectorAll('.thumbnail-placeholder');
+      placeholders.forEach(async (placeholder) => {
+        const downloadId = placeholder.dataset.downloadId;
+        const thumbnailUrl = placeholder.dataset.thumbnailUrl;
+
+        if (thumbnailUrl) {
+          const cachedUrl = await getCachedThumbnail(downloadId, thumbnailUrl);
+          if (cachedUrl) {
+            placeholder.outerHTML = `<img src="${cachedUrl}" alt="썸네일" class="thumbnail">`;
+          }
+        }
+      });
+    }
+
+    function getStatusText(status) {
+      const statusMap = {
+        'queued': '대기',
+        'downloading': '다운로드',
+        'uploading': '업로드',
+        'completed': '완료',
+        'error': '오류'
+      };
+      return statusMap[status] || status;
+    }
+
+    function getEncodingStatusText(status) {
+      const statusMap = {
+        'queued': '대기',
+        'encoding': '인코딩',
+        'completed': '완료',
+        'error': '오류'
+      };
+      return statusMap[status] || status;
+    }
+
+    // Refresh button
+    document.getElementById('refreshBtn').addEventListener('click', loadDownloads);
+
+    // Auto refresh
+    function startAutoRefresh() {
+      refreshInterval = setInterval(loadDownloads, 3000);
+    }
+
+    function stopAutoRefresh() {
+      if (refreshInterval) {
+        clearInterval(refreshInterval);
+      }
+    }
+
+    // Page visibility handling
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        stopAutoRefresh();
+      } else {
+        startAutoRefresh();
+      }
+    });
+
+    // Initial load
+    loadDownloads();
+    startAutoRefresh();
+  </script>
+</body>
+
+</html>

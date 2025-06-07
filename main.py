@@ -11,10 +11,12 @@ from typing import Dict, List, Optional
 from uuid_extensions import uuid7
 import yt_dlp
 from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.responses import RedirectResponse
+from fastapi.responses import FileResponse
+from contextlib import asynccontextmanager
 from minio import Minio
 from minio.commonconfig import Tags
 from minio.error import S3Error
+from minio.deleteobjects import DeleteObject
 from pydantic import BaseModel, HttpUrl
 
 # Configure logging
@@ -31,6 +33,8 @@ MINIO_SECURE = os.getenv("S3_SECURE", "true").lower() == "true"
 # Global state for tracking downloads
 downloads: Dict[str, Dict] = {}
 downloads_lock = asyncio.Lock()
+encoding_queue = asyncio.Queue()
+main_loop: Optional[asyncio.AbstractEventLoop] = None
 
 # Initialize MinIO client
 try:
@@ -52,8 +56,18 @@ except Exception as e:
     logger.error(f"Failed to initialize MinIO client: {e}")
     minio_client = None
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global main_loop
+    main_loop = asyncio.get_running_loop()
+    logger.info("Starting encoding worker.")
+    asyncio.create_task(encoding_worker())
+    yield
+
+
 # FastAPI app
-app = FastAPI(title="YouTube Downloader API", version="1.0.0")
+app = FastAPI(title="YouTube Downloader API", version="1.0.0", lifespan=lifespan)
 
 
 # Pydantic models
@@ -75,11 +89,20 @@ class DownloadResponse(BaseModel):
     eta: Optional[str] = None
     error: Optional[str] = None
     s3_object_name: Optional[str] = None
-    thumbnail_url: Optional[str] = None
+    thumbnail_url: Optional[HttpUrl] = None
+    encoding_status: Optional[str] = None
+    original_video_url: Optional[HttpUrl] = None
+    aac_url: Optional[HttpUrl] = None
+    webm_url: Optional[HttpUrl] = None
 
 
 class DownloadListResponse(BaseModel):
     downloads: List[DownloadResponse]
+
+
+class ScanResponse(BaseModel):
+    message: str
+    queued_count: int
 
 
 class DownloadProgress:
@@ -184,8 +207,10 @@ def download_and_upload(download_id: str, url: str, title: str):
             file_extension = downloaded_file.suffix
             s3_object_name = f"{download_id}{file_extension}"
 
+            downloads[download_id]["s3_object_name"] = s3_object_name
+
             # Generate thumbnail
-            thumbnail_path = Path(temp_dir) / f"{download_id}_thumbnail.jpg"
+            thumbnail_path = Path(temp_dir) / f"{download_id}.thumbnail.jpg"
             thumbnail_generated = generate_thumbnail(
                 str(downloaded_file), str(thumbnail_path)
             )
@@ -221,7 +246,7 @@ def download_and_upload(download_id: str, url: str, title: str):
                 # Upload thumbnail if generated successfully
                 thumbnail_object_name = None
                 if thumbnail_generated and thumbnail_path.exists():
-                    thumbnail_object_name = f"{download_id}_thumbnail.jpg"
+                    thumbnail_object_name = f"{download_id}.thumbnail.jpg"
                     minio_client.fput_object(
                         MINIO_BUCKET,
                         thumbnail_object_name,
@@ -232,14 +257,22 @@ def download_and_upload(download_id: str, url: str, title: str):
                     logger.info(f"Thumbnail uploaded: {thumbnail_object_name}")
 
                 # Update final status
-                downloads[download_id].update(
-                    {
-                        "status": "completed",
-                        "progress": 100.0,
-                        "s3_object_name": s3_object_name,
-                        "file_size": downloaded_file.stat().st_size,
-                    }
-                )
+                update_data = {
+                    "status": "completed",
+                    "progress": 100.0,
+                    "s3_object_name": s3_object_name,
+                    "file_size": downloaded_file.stat().st_size,
+                    "encoding_status": "queued",
+                }
+                downloads[download_id].update(update_data)
+
+                # Add to encoding queue
+                if main_loop:
+                    future = asyncio.run_coroutine_threadsafe(
+                        encoding_queue.put((download_id, s3_object_name)), main_loop
+                    )
+                    future.result()  # Wait for the item to be queued
+                    logger.info(f"Added {download_id} to encoding queue.")
 
                 logger.info(f"Successfully downloaded and uploaded: {title}")
             else:
@@ -250,6 +283,182 @@ def download_and_upload(download_id: str, url: str, title: str):
         downloads[download_id].update({"status": "error", "error": str(e)})
 
     logger.info(f"download_and_upload completed for {download_id}")
+
+
+async def encoding_worker():
+    """Worker to process video encoding tasks from a queue."""
+    while True:
+        download_id, s3_object_name = await encoding_queue.get()
+        logger.info(f"Starting encoding for {download_id} ({s3_object_name})")
+
+        async with downloads_lock:
+            downloads[download_id].update({"encoding_status": "encoding"})
+
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_dir_path = Path(temp_dir)
+                original_video_path = temp_dir_path / s3_object_name
+
+                # 1. Download original video from S3
+                logger.info(f"Downloading {s3_object_name} for encoding.")
+                minio_client.fget_object(
+                    MINIO_BUCKET, s3_object_name, str(original_video_path)
+                )
+
+                # 2. Encode to AAC
+                aac_filename = f"{download_id}.encoded.aac"
+                aac_path = temp_dir_path / aac_filename
+                ffmpeg_aac_cmd = [
+                    "ffmpeg",
+                    "-i",
+                    str(original_video_path),
+                    "-vn",
+                    "-c:a",
+                    "aac",
+                    "-y",
+                    str(aac_path),
+                ]
+                logger.info(f"Starting AAC encoding for {download_id}")
+                result = await asyncio.to_thread(
+                    subprocess.run, ffmpeg_aac_cmd, text=True
+                )
+                if result.returncode != 0:
+                    raise Exception(
+                        f"FFmpeg AAC encoding failed with return code {result.returncode}"
+                    )
+                logger.info(f"AAC encoding successful for {download_id}")
+                minio_client.fput_object(
+                    MINIO_BUCKET, aac_filename, str(aac_path), content_type="audio/aac"
+                )
+                logger.info(f"Uploaded {aac_filename} to S3")
+
+                # 3. Encode to WebM
+                webm_filename = f"{download_id}.encoded.webm"
+                webm_path = temp_dir_path / webm_filename
+                ffmpeg_webm_cmd = [
+                    "ffmpeg",
+                    "-i",
+                    str(original_video_path),
+                    "-c:v",
+                    "libvpx-vp9",
+                    "-crf",
+                    "30",
+                    "-b:v",
+                    "0",
+                    "-c:a",
+                    "libopus",
+                    "-b:a",
+                    "128k",
+                    "-y",
+                    str(webm_path),
+                ]
+                logger.info(f"Starting WebM encoding for {download_id}")
+                result = await asyncio.to_thread(
+                    subprocess.run, ffmpeg_webm_cmd, text=True
+                )
+                if result.returncode != 0:
+                    raise Exception(
+                        f"FFmpeg WebM encoding failed with return code {result.returncode}"
+                    )
+                logger.info(f"WebM encoding successful for {download_id}")
+                minio_client.fput_object(
+                    MINIO_BUCKET,
+                    webm_filename,
+                    str(webm_path),
+                    content_type="video/webm",
+                )
+                logger.info(f"Uploaded {webm_filename} to S3")
+
+            async with downloads_lock:
+                downloads[download_id].update(
+                    {
+                        "encoding_status": "completed",
+                        "s3_aac_object_name": aac_filename,
+                        "s3_webm_object_name": webm_filename,
+                    }
+                )
+
+        except Exception as e:
+            logger.error(f"Encoding failed for {download_id}: {e}")
+            async with downloads_lock:
+                downloads[download_id].update(
+                    {"encoding_status": "error", "error": str(e)}
+                )
+        finally:
+            encoding_queue.task_done()
+
+
+async def scan_and_encode_missing_videos() -> int:
+    """Scans S3 for videos missing encoded versions and queues them for encoding."""
+    logger.info("Starting scan for non-encoded videos in S3.")
+    if not minio_client:
+        logger.warning("MinIO client not available, skipping scan.")
+        return 0
+
+    try:
+        s3_files_map: Dict[str, Dict[str, Optional[str]]] = {}
+        objects = minio_client.list_objects(MINIO_BUCKET, recursive=True)
+
+        for obj in objects:
+            download_id = (
+                Path(obj.object_name)
+                .stem.replace(".encoded", "")
+                .replace(".thumbnail", "")
+            )
+            if download_id not in s3_files_map:
+                s3_files_map[download_id] = {
+                    "original": None,
+                    "aac": None,
+                    "webm": None,
+                }
+
+            if obj.object_name.endswith(".encoded.aac"):
+                s3_files_map[download_id]["aac"] = obj.object_name
+            elif obj.object_name.endswith(".encoded.webm"):
+                s3_files_map[download_id]["webm"] = obj.object_name
+            elif not obj.object_name.endswith(".thumbnail.jpg"):
+                s3_files_map[download_id]["original"] = obj.object_name
+
+        logger.info(f"s3_files_map: {s3_files_map}")
+
+        queued_count = 0
+        for download_id, files in s3_files_map.items():
+            if files["original"] and not (files["aac"] and files["webm"]):
+                is_processing = False
+                async with downloads_lock:
+                    if download_id in downloads:
+                        # Already in memory, likely being processed or queued.
+                        is_processing = True
+
+                if not is_processing:
+                    logger.info(
+                        f"Found non-encoded video: {files['original']}. Queuing for encoding."
+                    )
+                    original_object_name = files["original"]
+
+                    # To track progress, create a download record
+                    download_record = {
+                        "download_id": download_id,
+                        "url": "N/A (from S3 scan)",
+                        "title": "N/A (from S3 scan)",
+                        "status": "completed",
+                        "created_at": datetime.now().isoformat(),
+                        "progress": 100.0,
+                        "s3_object_name": original_object_name,
+                        "encoding_status": "queued",
+                    }
+                    async with downloads_lock:
+                        downloads[download_id] = download_record
+
+                    await encoding_queue.put((download_id, original_object_name))
+                    queued_count += 1
+
+        logger.info(f"Scan complete. Queued {queued_count} videos for encoding.")
+        return queued_count
+
+    except S3Error as e:
+        logger.error(f"Error during S3 scan for non-encoded videos: {e}")
+        return 0
 
 
 @app.post("/download", response_model=DownloadResponse)
@@ -273,6 +482,10 @@ async def start_download(request: DownloadRequest, background_tasks: BackgroundT
         "error": None,
         "s3_object_name": None,
         "thumbnail_url": None,
+        "encoding_status": None,
+        "original_video_url": None,
+        "aac_url": None,
+        "webm_url": None,
     }
 
     async with downloads_lock:
@@ -298,16 +511,26 @@ async def list_downloads():
             objects = minio_client.list_objects(MINIO_BUCKET, recursive=True)
             video_objects = {}
             thumbnail_objects = {}
+            aac_objects = {}
+            webm_objects = {}
 
             # Separate video and thumbnail objects
             for obj in objects:
                 obj_name = obj.object_name
-                if obj_name.endswith("_thumbnail.jpg"):
-                    download_id = obj_name.replace("_thumbnail.jpg", "")
-                    thumbnail_objects[download_id] = obj
+                download_id_stem = (
+                    Path(obj_name)
+                    .stem.replace(".thumbnail", "")
+                    .replace(".encoded", "")
+                )
+
+                if obj_name.endswith(".thumbnail.jpg"):
+                    thumbnail_objects[download_id_stem] = obj
+                elif obj_name.endswith(".encoded.aac"):
+                    aac_objects[download_id_stem] = obj
+                elif obj_name.endswith(".encoded.webm"):
+                    webm_objects[download_id_stem] = obj
                 else:
-                    download_id = Path(obj_name).stem
-                    video_objects[download_id] = obj
+                    video_objects[download_id_stem] = obj
 
             # Process video objects and add thumbnail URLs
             for download_id, obj in video_objects.items():
@@ -332,17 +555,59 @@ async def list_downloads():
                     url = "Unknown URL"
                     created_at = obj.last_modified.isoformat()
 
-                # Generate thumbnail presigned URL if thumbnail exists (10 minutes expiry)
+                expires = timedelta(hours=12)
+
+                # Generate original video presigned URL if original video exists (12 hours expiry)
+                original_video_url = None
+                if download_id in video_objects:
+                    try:
+                        original_video_url = minio_client.presigned_get_object(
+                            MINIO_BUCKET,
+                            video_objects[download_id].object_name,
+                            expires=expires,
+                        )
+                    except S3Error as e:
+                        logger.error(
+                            f"Error generating original video presigned URL: {e}"
+                        )
+
+                # Generate thumbnail presigned URL if thumbnail exists (12 hours expiry)
                 thumbnail_url = None
                 if download_id in thumbnail_objects:
                     try:
                         thumbnail_url = minio_client.presigned_get_object(
                             MINIO_BUCKET,
-                            f"{download_id}_thumbnail.jpg",
-                            expires=timedelta(minutes=10),
+                            f"{download_id}.thumbnail.jpg",
+                            expires=expires,
                         )
                     except S3Error as e:
                         logger.error(f"Error generating thumbnail presigned URL: {e}")
+
+                # Generate AAC presigned URL
+                aac_url = None
+                if download_id in aac_objects:
+                    try:
+                        aac_url = minio_client.presigned_get_object(
+                            MINIO_BUCKET, f"{download_id}.encoded.aac", expires=expires
+                        )
+                    except S3Error as e:
+                        logger.error(f"Error generating AAC presigned URL: {e}")
+
+                # Generate WebM presigned URL
+                webm_url = None
+                if download_id in webm_objects:
+                    try:
+                        webm_url = minio_client.presigned_get_object(
+                            MINIO_BUCKET, f"{download_id}.encoded.webm", expires=expires
+                        )
+                    except S3Error as e:
+                        logger.error(f"Error generating WebM presigned URL: {e}")
+
+                encoding_status = (
+                    "completed"
+                    if download_id in aac_objects and download_id in webm_objects
+                    else None
+                )
 
                 all_downloads[download_id] = DownloadResponse(
                     download_id=download_id,
@@ -355,6 +620,10 @@ async def list_downloads():
                     downloaded_size=obj.size,
                     s3_object_name=obj.object_name,
                     thumbnail_url=thumbnail_url,
+                    encoding_status=encoding_status,
+                    original_video_url=original_video_url,
+                    aac_url=aac_url,
+                    webm_url=webm_url,
                 )
         except S3Error as e:
             logger.error(f"Error listing S3 objects: {e}")
@@ -362,23 +631,57 @@ async def list_downloads():
     # 2. Get in-memory downloads and overwrite/add to the list
     async with downloads_lock:
         for did, d_record in downloads.items():
+            expires = timedelta(hours=12)
             # For in-memory downloads, also try to generate thumbnail URL if completed
             thumbnail_url = None
             if d_record.get("status") == "completed" and minio_client:
                 try:
                     # Check if thumbnail exists
-                    minio_client.stat_object(MINIO_BUCKET, f"{did}_thumbnail.jpg")
+                    thumb_obj_name = f"{did}.thumbnail.jpg"
+                    minio_client.stat_object(MINIO_BUCKET, thumb_obj_name)
                     thumbnail_url = minio_client.presigned_get_object(
                         MINIO_BUCKET,
-                        f"{did}_thumbnail.jpg",
-                        expires=timedelta(minutes=10),
+                        thumb_obj_name,
+                        expires=expires,
                     )
                 except S3Error:
                     # Thumbnail doesn't exist, ignore
                     pass
 
+            # Generate presigned URL for original video
+            original_video_url = None
+            if d_record.get("s3_object_name") and minio_client:
+                try:
+                    original_video_url = minio_client.presigned_get_object(
+                        MINIO_BUCKET, d_record["s3_object_name"], expires=expires
+                    )
+                except S3Error:
+                    pass
+
+            # Generate presigned URLs for encoded files
+            aac_url = None
+            if d_record.get("s3_aac_object_name") and minio_client:
+                try:
+                    aac_url = minio_client.presigned_get_object(
+                        MINIO_BUCKET, d_record["s3_aac_object_name"], expires=expires
+                    )
+                except S3Error:
+                    pass
+
+            webm_url = None
+            if d_record.get("s3_webm_object_name") and minio_client:
+                try:
+                    webm_url = minio_client.presigned_get_object(
+                        MINIO_BUCKET, d_record["s3_webm_object_name"], expires=expires
+                    )
+                except S3Error:
+                    pass
+
             d_record_copy = d_record.copy()
             d_record_copy["thumbnail_url"] = thumbnail_url
+            d_record_copy["aac_url"] = aac_url
+            d_record_copy["webm_url"] = webm_url
+            d_record_copy["original_video_url"] = original_video_url
             all_downloads[did] = DownloadResponse(**d_record_copy)
 
     # 3. Sort and return
@@ -388,110 +691,89 @@ async def list_downloads():
     return DownloadListResponse(downloads=download_list)
 
 
-@app.get("/downloads/{download_id}")
-async def get_download(download_id: str):
-    """Get status of a specific download or redirect to S3 file."""
-    # 1. Check in-memory downloads
-    async with downloads_lock:
-        download_record = downloads.get(download_id)
-
-    if download_record:
-        if download_record["status"] == "completed" and download_record.get(
-            "s3_object_name"
-        ):
-            pass  # Fall through to S3 redirect logic
-        else:
-            # For non-completed, return status JSON
-            return DownloadResponse(**download_record)
-
-    # 2. Check S3 for a completed download and redirect
-    if minio_client:
-        s3_object_name = None
-        # if we have it from the in-memory record
-        if download_record and download_record.get("s3_object_name"):
-            s3_object_name = download_record.get("s3_object_name")
-        else:
-            # If not in memory, we have to find it in S3.
-            try:
-                objects = minio_client.list_objects(
-                    MINIO_BUCKET, prefix=download_id, recursive=False
-                )
-                found_objects = [
-                    obj.object_name
-                    for obj in objects
-                    if Path(obj.object_name).stem == download_id
-                ]
-                if found_objects:
-                    s3_object_name = found_objects[0]
-            except S3Error as e:
-                logger.error(
-                    f"Error searching for S3 object with prefix {download_id}: {e}"
-                )
-                raise HTTPException(
-                    status_code=500, detail="Error searching for download in S3."
-                )
-
-        if s3_object_name:
-            try:
-                # Generate presigned URL
-                signed_url = minio_client.presigned_get_object(
-                    MINIO_BUCKET,
-                    s3_object_name,
-                    expires=timedelta(hours=12),  # Make it valid for 12 hour
-                )
-                return RedirectResponse(url=signed_url)
-            except S3Error as e:
-                logger.error(
-                    f"Error generating presigned URL for {s3_object_name}: {e}"
-                )
-                raise HTTPException(
-                    status_code=500, detail="Could not generate download link."
-                )
-
-    # 3. If not found anywhere
-    raise HTTPException(status_code=404, detail="Download not found")
-
-
 @app.delete("/downloads/{download_id}")
 async def delete_download(download_id: str):
-    """Delete a download and its associated file from S3"""
+    """Delete a download and its associated files from S3"""
+    # Find the download record, first in-memory, then try S3 for persisted downloads
+    download_s3_object_name = None
     async with downloads_lock:
-        if download_id not in downloads:
-            raise HTTPException(status_code=404, detail="Download not found")
+        if download_id in downloads:
+            download_s3_object_name = downloads[download_id].get("s3_object_name")
 
-        download_record = downloads[download_id]
+    if not download_s3_object_name and minio_client:
+        # If not in memory, maybe it's a completed download, check S3
+        try:
+            objects = minio_client.list_objects(MINIO_BUCKET, prefix=download_id)
+            for obj in objects:
+                if not obj.object_name.endswith(
+                    (".thumbnail.jpg", ".encoded.aac", ".encoded.webm")
+                ):
+                    download_s3_object_name = obj.object_name
+                    break
+        except S3Error:
+            pass  # Object not found on S3 either
+
+    if not download_s3_object_name:
+        # If still no s3_object_name, it's not found anywhere
+        # but maybe it's still in memory but not uploaded, so we just remove from memory
+        async with downloads_lock:
+            if download_id in downloads:
+                del downloads[download_id]
+                return {"message": f"In-memory download {download_id} deleted."}
+        raise HTTPException(status_code=404, detail="Download not found")
 
     # Delete from S3 if it exists
-    if minio_client and download_record.get("s3_object_name"):
+    if minio_client:
         try:
-            minio_client.remove_object(MINIO_BUCKET, download_record["s3_object_name"])
-            logger.info(f"Deleted S3 object: {download_record['s3_object_name']}")
+            file_extension = "".join(Path(download_s3_object_name).suffixes)
+            objects_to_delete = [
+                DeleteObject(f"{download_id}{file_extension}"),
+                DeleteObject(f"{download_id}.thumbnail.jpg"),
+                DeleteObject(f"{download_id}.encoded.aac"),
+                DeleteObject(f"{download_id}.encoded.webm"),
+            ]
+            errors = minio_client.remove_objects(MINIO_BUCKET, objects_to_delete)
+            deleted_files, error_files = [], []
+            for e in errors:
+                error_files.append(e.object_name)
+            for d in objects_to_delete:
+                if d.object_name not in error_files:
+                    deleted_files.append(d.object_name)
+            logger.info(f"Deleted S3 objects: {deleted_files}")
+            if error_files:
+                logger.error(f"Errors deleting S3 objects: {error_files}")
         except S3Error as e:
-            logger.error(f"Error deleting S3 object: {e}")
+            logger.error(f"Error deleting S3 objects: {e}")
             raise HTTPException(
                 status_code=500, detail=f"Failed to delete from S3: {e}"
             )
 
     # Remove from downloads tracking
     async with downloads_lock:
-        del downloads[download_id]
+        if download_id in downloads:
+            del downloads[download_id]
 
-    return {"message": f"Download {download_id} deleted successfully"}
+    return {
+        "message": f"Download {download_id} and associated files deleted successfully"
+    }
+
+
+@app.post("/encode/scan", response_model=ScanResponse)
+async def trigger_scan_and_encode():
+    """
+    Manually triggers a scan of the S3 bucket to find and queue non-encoded videos.
+    """
+    queued_count = await scan_and_encode_missing_videos()
+    return ScanResponse(
+        message="Scan complete. See /downloads for status.",
+        queued_count=queued_count,
+    )
 
 
 @app.get("/")
 async def root():
-    """Root endpoint with API information"""
-    return {
-        "message": "YouTube Downloader API",
-        "version": "1.0.0",
-        "endpoints": {
-            "POST /download": "Start downloading a video",
-            "GET /downloads": "List all downloads",
-            "GET /downloads/{id}": "Get specific download status",
-            "DELETE /downloads/{id}": "Delete a download",
-        },
-    }
+    """Return index.html"""
+    return FileResponse("index.html")
 
 
 @app.get("/health")
