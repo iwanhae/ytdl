@@ -829,10 +829,10 @@
             </div>
           ` : ''}
           
-          ${(download.aac_url || download.webm_url || download.original_video_url) ? `
+          ${(download.mp3_url || download.webm_url || download.original_video_url) ? `
             <div class="download-links">
               ${download.original_video_url ? `<a href="${download.original_video_url}" class="download-link" download>원본</a>` : ''}
-              ${download.aac_url ? `<a href="${download.aac_url}" class="download-link" download>오디오 (AAC)</a>` : ''}
+              ${download.mp3_url ? `<a href="${download.mp3_url}" class="download-link" download>오디오 (mp3)</a>` : ''}
               ${download.webm_url ? `<a href="${download.webm_url}" class="download-link" download>비디오 (WebM)</a>` : ''}
             </div>
           ` : ''}

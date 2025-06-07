@@ -92,7 +92,7 @@ class DownloadResponse(BaseModel):
     thumbnail_url: Optional[HttpUrl] = None
     encoding_status: Optional[str] = None
     original_video_url: Optional[HttpUrl] = None
-    aac_url: Optional[HttpUrl] = None
+    mp3_url: Optional[HttpUrl] = None
     webm_url: Optional[HttpUrl] = None
 
 
@@ -312,15 +312,15 @@ async def encoding_worker():
                     video_url = download_record.get("url", "Unknown")
                     download_time = download_record.get("created_at", "Unknown")
 
-                # 2. Encode to AAC
-                aac_filename = f"{download_id}.encoded.aac"
-                aac_path = temp_dir_path / aac_filename
+                # 2. Encode to MP3
+                mp3_filename = f"{download_id}.encoded.mp3"
+                mp3_path = temp_dir_path / mp3_filename
 
                 # Create description with download time and original URL
                 description = f"Downloaded: {download_time}, Original URL: {video_url}"
 
                 # Download existing thumbnail from S3 for album art
-                thumbnail_for_aac_path = temp_dir_path / f"{download_id}.thumbnail.jpg"
+                thumbnail_for_mp3_path = temp_dir_path / f"{download_id}.thumbnail.jpg"
                 thumbnail_object_name = f"{download_id}.thumbnail.jpg"
                 thumbnail_available = False
 
@@ -329,16 +329,16 @@ async def encoding_worker():
                         f"Downloading existing thumbnail from S3 for {download_id}"
                     )
                     minio_client.fget_object(
-                        MINIO_BUCKET, thumbnail_object_name, str(thumbnail_for_aac_path)
+                        MINIO_BUCKET, thumbnail_object_name, str(thumbnail_for_mp3_path)
                     )
-                    thumbnail_available = thumbnail_for_aac_path.exists()
-                    logger.info(f"Successfully downloaded thumbnail for AAC album art")
+                    thumbnail_available = thumbnail_for_mp3_path.exists()
+                    logger.info("Successfully downloaded thumbnail for MP3 album art")
                 except Exception as e:
                     logger.warning(f"Failed to download thumbnail from S3: {e}")
                     thumbnail_available = False
 
-                # Build FFmpeg command for AAC encoding with optional album art
-                ffmpeg_aac_cmd = [
+                # Build FFmpeg command for MP3 encoding with optional album art
+                ffmpeg_mp3_cmd = [
                     "ffmpeg",
                     "-i",
                     str(original_video_path),
@@ -346,13 +346,13 @@ async def encoding_worker():
 
                 # Add thumbnail as input if available
                 if thumbnail_available:
-                    ffmpeg_aac_cmd.extend(["-i", str(thumbnail_for_aac_path)])
+                    ffmpeg_mp3_cmd.extend(["-i", str(thumbnail_for_mp3_path)])
 
-                ffmpeg_aac_cmd.extend(
+                ffmpeg_mp3_cmd.extend(
                     [
                         "-vn",  # No video
                         "-c:a",
-                        "aac",
+                        "libmp3lame",
                         "-id3v2_version",
                         "4",  # Use ID3v2.4
                     ]
@@ -360,16 +360,12 @@ async def encoding_worker():
 
                 # Map audio and optionally album art
                 if thumbnail_available:
-                    ffmpeg_aac_cmd.extend(
+                    ffmpeg_mp3_cmd.extend(
                         [
                             "-map",
                             "0:a:0",  # Audio from first input (video)
                             "-map",
                             "1:0",  # Image from second input (thumbnail)
-                            "-c:v",
-                            "mjpeg",  # Codec for album art
-                            "-disposition:v",
-                            "attached_pic",  # Mark as album art
                         ]
                     )
 
@@ -385,8 +381,8 @@ async def encoding_worker():
                 except:
                     date_tag = datetime.now().strftime("%Y-%m-%d")
 
-                # Add metadata to AAC file
-                ffmpeg_aac_cmd.extend(
+                # Add metadata to MP3 file
+                ffmpeg_mp3_cmd.extend(
                     [
                         "-metadata",
                         f"title={video_title}",  # TIT2: Title
@@ -401,29 +397,29 @@ async def encoding_worker():
                         "-metadata",
                         "genre=Downloaded",  # TCON: Content type
                         "-y",
-                        str(aac_path),
+                        str(mp3_path),
                     ]
                 )
 
-                logger.info(f"Starting AAC encoding for {download_id}")
+                logger.info(f"Starting MP3 encoding for {download_id}")
                 result = await asyncio.to_thread(
-                    subprocess.run, ffmpeg_aac_cmd, text=True
+                    subprocess.run, ffmpeg_mp3_cmd, text=True
                 )
                 if result.returncode != 0:
                     raise Exception(
-                        f"FFmpeg AAC encoding failed with return code {result.returncode}"
+                        f"FFmpeg MP3 encoding failed with return code {result.returncode}"
                     )
-                logger.info(f"AAC encoding successful for {download_id}")
+                logger.info(f"MP3 encoding successful for {download_id}")
                 minio_client.fput_object(
-                    MINIO_BUCKET, aac_filename, str(aac_path), content_type="audio/aac"
+                    MINIO_BUCKET, mp3_filename, str(mp3_path), content_type="audio/mpeg"
                 )
-                logger.info(f"Uploaded {aac_filename} to S3")
+                logger.info(f"Uploaded {mp3_filename} to S3")
 
                 async with downloads_lock:
                     downloads[download_id].update(
                         {
-                            "encoding_status": "aac_completed",
-                            "s3_aac_object_name": aac_filename,
+                            "encoding_status": "mp3_completed",
+                            "s3_mp3_object_name": mp3_filename,
                         }
                     )
                 # 3. Encode to WebM
@@ -459,7 +455,7 @@ async def encoding_worker():
                 downloads[download_id].update(
                     {
                         "encoding_status": "completed",
-                        "s3_aac_object_name": aac_filename,
+                        "s3_mp3_object_name": mp3_filename,
                         "s3_webm_object_name": webm_filename,
                     }
                 )
@@ -494,12 +490,12 @@ async def scan_and_encode_missing_videos() -> int:
             if download_id not in s3_files_map:
                 s3_files_map[download_id] = {
                     "original": None,
-                    "aac": None,
+                    "mp3": None,
                     "webm": None,
                 }
 
-            if obj.object_name.endswith(".encoded.aac"):
-                s3_files_map[download_id]["aac"] = obj.object_name
+            if obj.object_name.endswith(".encoded.mp3"):
+                s3_files_map[download_id]["mp3"] = obj.object_name
             elif obj.object_name.endswith(".encoded.webm"):
                 s3_files_map[download_id]["webm"] = obj.object_name
             elif not obj.object_name.endswith(".thumbnail.jpg"):
@@ -509,7 +505,7 @@ async def scan_and_encode_missing_videos() -> int:
 
         queued_count = 0
         for download_id, files in s3_files_map.items():
-            if files["original"] and not (files["aac"] and files["webm"]):
+            if files["original"] and not (files["mp3"] and files["webm"]):
                 is_processing = False
                 async with downloads_lock:
                     if download_id in downloads:
@@ -570,7 +566,7 @@ async def start_download(request: DownloadRequest, background_tasks: BackgroundT
         "thumbnail_url": None,
         "encoding_status": None,
         "original_video_url": None,
-        "aac_url": None,
+        "mp3_url": None,
         "webm_url": None,
     }
 
@@ -597,7 +593,7 @@ async def list_downloads():
             objects = minio_client.list_objects(MINIO_BUCKET, recursive=True)
             video_objects = {}
             thumbnail_objects = {}
-            aac_objects = {}
+            mp3_objects = {}
             webm_objects = {}
 
             # Separate video and thumbnail objects
@@ -611,8 +607,8 @@ async def list_downloads():
 
                 if obj_name.endswith(".thumbnail.jpg"):
                     thumbnail_objects[download_id_stem] = obj
-                elif obj_name.endswith(".encoded.aac"):
-                    aac_objects[download_id_stem] = obj
+                elif obj_name.endswith(".encoded.mp3"):
+                    mp3_objects[download_id_stem] = obj
                 elif obj_name.endswith(".encoded.webm"):
                     webm_objects[download_id_stem] = obj
                 else:
@@ -669,15 +665,15 @@ async def list_downloads():
                     except S3Error as e:
                         logger.error(f"Error generating thumbnail presigned URL: {e}")
 
-                # Generate AAC presigned URL
-                aac_url = None
-                if download_id in aac_objects:
+                # Generate MP3 presigned URL
+                mp3_url = None
+                if download_id in mp3_objects:
                     try:
-                        aac_url = minio_client.presigned_get_object(
-                            MINIO_BUCKET, f"{download_id}.encoded.aac", expires=expires
+                        mp3_url = minio_client.presigned_get_object(
+                            MINIO_BUCKET, f"{download_id}.encoded.mp3", expires=expires
                         )
                     except S3Error as e:
-                        logger.error(f"Error generating AAC presigned URL: {e}")
+                        logger.error(f"Error generating MP3 presigned URL: {e}")
 
                 # Generate WebM presigned URL
                 webm_url = None
@@ -691,7 +687,7 @@ async def list_downloads():
 
                 encoding_status = (
                     "completed"
-                    if download_id in aac_objects and download_id in webm_objects
+                    if download_id in mp3_objects and download_id in webm_objects
                     else None
                 )
 
@@ -708,7 +704,7 @@ async def list_downloads():
                     thumbnail_url=thumbnail_url,
                     encoding_status=encoding_status,
                     original_video_url=original_video_url,
-                    aac_url=aac_url,
+                    mp3_url=mp3_url,
                     webm_url=webm_url,
                 )
         except S3Error as e:
@@ -745,11 +741,11 @@ async def list_downloads():
                     pass
 
             # Generate presigned URLs for encoded files
-            aac_url = None
-            if d_record.get("s3_aac_object_name") and minio_client:
+            mp3_url = None
+            if d_record.get("s3_mp3_object_name") and minio_client:
                 try:
-                    aac_url = minio_client.presigned_get_object(
-                        MINIO_BUCKET, d_record["s3_aac_object_name"], expires=expires
+                    mp3_url = minio_client.presigned_get_object(
+                        MINIO_BUCKET, d_record["s3_mp3_object_name"], expires=expires
                     )
                 except S3Error:
                     pass
@@ -765,7 +761,7 @@ async def list_downloads():
 
             d_record_copy = d_record.copy()
             d_record_copy["thumbnail_url"] = thumbnail_url
-            d_record_copy["aac_url"] = aac_url
+            d_record_copy["mp3_url"] = mp3_url
             d_record_copy["webm_url"] = webm_url
             d_record_copy["original_video_url"] = original_video_url
             all_downloads[did] = DownloadResponse(**d_record_copy)
@@ -792,7 +788,7 @@ async def delete_download(download_id: str):
             objects = minio_client.list_objects(MINIO_BUCKET, prefix=download_id)
             for obj in objects:
                 if not obj.object_name.endswith(
-                    (".thumbnail.jpg", ".encoded.aac", ".encoded.webm")
+                    (".thumbnail.jpg", ".encoded.mp3", ".encoded.webm")
                 ):
                     download_s3_object_name = obj.object_name
                     break
@@ -815,7 +811,7 @@ async def delete_download(download_id: str):
             objects_to_delete = [
                 DeleteObject(f"{download_id}{file_extension}"),
                 DeleteObject(f"{download_id}.thumbnail.jpg"),
-                DeleteObject(f"{download_id}.encoded.aac"),
+                DeleteObject(f"{download_id}.encoded.mp3"),
                 DeleteObject(f"{download_id}.encoded.webm"),
             ]
             errors = minio_client.remove_objects(MINIO_BUCKET, objects_to_delete)
