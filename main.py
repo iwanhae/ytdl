@@ -350,7 +350,6 @@ async def encoding_worker():
 
                 ffmpeg_mp3_cmd.extend(
                     [
-                        "-vn",  # No video
                         "-c:a",
                         "libmp3lame",
                         "-id3v2_version",
@@ -366,8 +365,14 @@ async def encoding_worker():
                             "0:a:0",  # Audio from first input (video)
                             "-map",
                             "1:0",  # Image from second input (thumbnail)
+                            "-c:v",
+                            "copy",
+                            "-disposition:v:0",
+                            "attached_pic",
                         ]
                     )
+                else:
+                    ffmpeg_mp3_cmd.append("-vn")
 
                 # Extract date from created_at for ID3v2.4 TDRC tag
                 try:
