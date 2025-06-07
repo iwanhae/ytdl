@@ -1,17 +1,18 @@
 import asyncio
-import json
+import base64
 import logging
 import os
 import tempfile
-import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
-from uuid import uuid4
 
+from uuid_extensions import uuid7
 import yt_dlp
 from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.responses import RedirectResponse
 from minio import Minio
+from minio.commonconfig import Tags
 from minio.error import S3Error
 from pydantic import BaseModel, HttpUrl
 
@@ -72,6 +73,7 @@ class DownloadResponse(BaseModel):
     speed: Optional[str] = None
     eta: Optional[str] = None
     error: Optional[str] = None
+    s3_object_name: Optional[str] = None
 
 
 class DownloadListResponse(BaseModel):
@@ -94,7 +96,7 @@ class DownloadProgress:
 
             self.update_progress(
                 progress=progress,
-                file_size=total_bytes,
+                file_size=int(total_bytes) if total_bytes is not None else None,
                 downloaded_size=downloaded_bytes,
                 speed=d.get("speed_str"),
                 eta=d.get("eta_str"),
@@ -124,7 +126,7 @@ def download_and_upload(download_id: str, url: str, title: str):
 
             # Configure yt-dlp options
             ydl_opts = {
-                "format": "best[height<=1080]",  # Best quality up to 1080p
+                "format": "bestvideo*+bestaudio/best",
                 "outtmpl": str(output_path),
                 "progress_hooks": [DownloadProgress(download_id)],
                 "no_warnings": True,
@@ -148,12 +150,25 @@ def download_and_upload(download_id: str, url: str, title: str):
 
             downloaded_file = downloaded_files[0]
             file_extension = downloaded_file.suffix
-            s3_object_name = f"{download_id}/{title}{file_extension}"
+            s3_object_name = f"{download_id}{file_extension}"
 
             # Upload to S3
             downloads[download_id].update({"status": "uploading", "progress": 100.0})
 
             if minio_client:
+                # Prepare metadata tags
+                title_b64 = base64.b64encode(title.encode("utf-8")).decode("utf-8")
+                tags = Tags.new_object_tags()
+                tags.update(
+                    {
+                        "title_b64": title_b64,
+                        "url_b64": base64.b64encode(url.encode("utf-8")).decode(
+                            "utf-8"
+                        ),
+                        "download_timestamp": datetime.now().isoformat(),
+                    }
+                )
+
                 minio_client.fput_object(
                     MINIO_BUCKET,
                     s3_object_name,
@@ -161,6 +176,7 @@ def download_and_upload(download_id: str, url: str, title: str):
                     content_type=f"video/{file_extension[1:]}"
                     if file_extension
                     else "video/mp4",
+                    tags=tags,
                 )
 
                 # Update final status
@@ -187,7 +203,7 @@ def download_and_upload(download_id: str, url: str, title: str):
 @app.post("/download", response_model=DownloadResponse)
 async def start_download(request: DownloadRequest, background_tasks: BackgroundTasks):
     """Start downloading a video from the given URL"""
-    download_id = str(uuid4())
+    download_id = str(uuid7())
     logger.info(f"Starting download process for {request.url}, ID: {download_id}")
 
     # Initialize download record
@@ -203,6 +219,7 @@ async def start_download(request: DownloadRequest, background_tasks: BackgroundT
         "speed": None,
         "eta": None,
         "error": None,
+        "s3_object_name": None,
     }
 
     async with downloads_lock:
@@ -219,22 +236,125 @@ async def start_download(request: DownloadRequest, background_tasks: BackgroundT
 
 @app.get("/downloads", response_model=DownloadListResponse)
 async def list_downloads():
-    """List all downloads with their current status"""
-    async with downloads_lock:
-        download_list = [
-            DownloadResponse(**download) for download in downloads.values()
-        ]
+    """List all downloads with their current status, fetching completed from S3."""
+    all_downloads: Dict[str, DownloadResponse] = {}
 
+    # 1. Get completed downloads from S3
+    if minio_client:
+        try:
+            objects = minio_client.list_objects(MINIO_BUCKET, recursive=True)
+            for obj in objects:
+                download_id = Path(obj.object_name).stem
+
+                tags = minio_client.get_object_tags(MINIO_BUCKET, obj.object_name)
+
+                if tags:
+                    title = (
+                        base64.b64decode(tags["title_b64"]).decode("utf-8")
+                        if "title_b64" in tags
+                        else "Unknown Title"
+                    )
+                    url = (
+                        base64.b64decode(tags["url_b64"]).decode("utf-8")
+                        if "url_b64" in tags
+                        else "Unknown URL"
+                    )
+                    created_at = tags.get(
+                        "download_timestamp", obj.last_modified.isoformat()
+                    )
+                else:
+                    title = "Unknown Title"
+                    url = "Unknown URL"
+                    created_at = obj.last_modified.isoformat()
+
+                all_downloads[download_id] = DownloadResponse(
+                    download_id=download_id,
+                    url=url,
+                    title=title,
+                    status="completed",
+                    created_at=created_at,
+                    progress=100.0,
+                    file_size=obj.size,
+                    downloaded_size=obj.size,
+                    s3_object_name=obj.object_name,
+                )
+        except S3Error as e:
+            logger.error(f"Error listing S3 objects: {e}")
+
+    # 2. Get in-memory downloads and overwrite/add to the list
+    async with downloads_lock:
+        for did, d_record in downloads.items():
+            all_downloads[did] = DownloadResponse(**d_record)
+
+    # 3. Sort and return
+    download_list = sorted(
+        list(all_downloads.values()), key=lambda d: d.created_at, reverse=True
+    )
     return DownloadListResponse(downloads=download_list)
 
 
-@app.get("/downloads/{download_id}", response_model=DownloadResponse)
+@app.get("/downloads/{download_id}")
 async def get_download(download_id: str):
-    """Get status of a specific download"""
+    """Get status of a specific download or redirect to S3 file."""
+    # 1. Check in-memory downloads
     async with downloads_lock:
-        if download_id not in downloads:
-            raise HTTPException(status_code=404, detail="Download not found")
-        return DownloadResponse(**downloads[download_id])
+        download_record = downloads.get(download_id)
+
+    if download_record:
+        if download_record["status"] == "completed" and download_record.get(
+            "s3_object_name"
+        ):
+            pass  # Fall through to S3 redirect logic
+        else:
+            # For non-completed, return status JSON
+            return DownloadResponse(**download_record)
+
+    # 2. Check S3 for a completed download and redirect
+    if minio_client:
+        s3_object_name = None
+        # if we have it from the in-memory record
+        if download_record and download_record.get("s3_object_name"):
+            s3_object_name = download_record.get("s3_object_name")
+        else:
+            # If not in memory, we have to find it in S3.
+            try:
+                objects = minio_client.list_objects(
+                    MINIO_BUCKET, prefix=download_id, recursive=False
+                )
+                found_objects = [
+                    obj.object_name
+                    for obj in objects
+                    if Path(obj.object_name).stem == download_id
+                ]
+                if found_objects:
+                    s3_object_name = found_objects[0]
+            except S3Error as e:
+                logger.error(
+                    f"Error searching for S3 object with prefix {download_id}: {e}"
+                )
+                raise HTTPException(
+                    status_code=500, detail="Error searching for download in S3."
+                )
+
+        if s3_object_name:
+            try:
+                # Generate presigned URL
+                signed_url = minio_client.presigned_get_object(
+                    MINIO_BUCKET,
+                    s3_object_name,
+                    expires=timedelta(hours=1),  # Make it valid for 1 hour
+                )
+                return RedirectResponse(url=signed_url)
+            except S3Error as e:
+                logger.error(
+                    f"Error generating presigned URL for {s3_object_name}: {e}"
+                )
+                raise HTTPException(
+                    status_code=500, detail="Could not generate download link."
+                )
+
+    # 3. If not found anywhere
+    raise HTTPException(status_code=404, detail="Download not found")
 
 
 @app.delete("/downloads/{download_id}")

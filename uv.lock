@@ -470,6 +470,15 @@ wheels = [
 ]
 
 [[package]]
+name = "uuid7"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/5c/19/7472bd526591e2192926247109dbf78692e709d3e56775792fec877a7720/uuid7-0.1.0.tar.gz", hash = "sha256:8c57aa32ee7456d3cc68c95c4530bc571646defac01895cfc73545449894a63c", size = 14052 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b5/77/8852f89a91453956582a85024d80ad96f30a41fed4c2b3dce0c9f12ecc7e/uuid7-0.1.0-py2.py3-none-any.whl", hash = "sha256:5e259bb63c8cb4aded5927ff41b444a80d0c7124e8a0ced7cf44efa1f5cccf61", size = 7477 },
+]
+
+[[package]]
 name = "uvicorn"
 version = "0.34.3"
 source = { registry = "https://pypi.org/simple" }
@@ -627,6 +636,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "ffmpeg-python" },
     { name = "minio" },
+    { name = "uuid7" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "yt-dlp" },
 ]
@@ -641,6 +651,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.104.1" },
     { name = "ffmpeg-python", specifier = ">=0.2.0" },
     { name = "minio", specifier = ">=7.2.15" },
+    { name = "uuid7", specifier = ">=0.1.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.24.0" },
     { name = "yt-dlp", specifier = ">=2025.5.22" },
 ]

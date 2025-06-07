@@ -4,3 +4,10 @@ Content-Type: application/json
 {
     "url": "https://www.youtube.com/watch?v=gq0C6-Qu1eQ"
 }
+###
+
+GET http://127.0.0.1:8000/downloads
+
+###
+
+GET http://127.0.0.1:8000/downloads/06843f9d-2bcf-7b54-8000-8ecaeb25a002

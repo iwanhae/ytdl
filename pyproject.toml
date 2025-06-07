@@ -10,6 +10,7 @@ dependencies = [
     "ffmpeg-python>=0.2.0",
     "minio>=7.2.15",
     "yt-dlp>=2025.5.22",
+    "uuid7>=0.1.0",
 ]
 
 [dependency-groups]
