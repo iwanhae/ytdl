@@ -2,6 +2,7 @@ import asyncio
 import base64
 import logging
 import os
+import subprocess
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -74,6 +75,7 @@ class DownloadResponse(BaseModel):
     eta: Optional[str] = None
     error: Optional[str] = None
     s3_object_name: Optional[str] = None
+    thumbnail_url: Optional[str] = None
 
 
 class DownloadListResponse(BaseModel):
@@ -111,6 +113,36 @@ class DownloadProgress:
     def update_progress(self, **kwargs):
         if self.download_id in downloads:
             downloads[self.download_id].update(kwargs)
+
+
+def generate_thumbnail(video_path: str, thumbnail_path: str) -> bool:
+    """Generate thumbnail using ffmpeg"""
+    try:
+        # Generate thumbnail at 5 seconds into the video
+        cmd = [
+            "ffmpeg",
+            "-i",
+            video_path,
+            "-ss",
+            "00:00:05",  # 5 seconds into video
+            "-vframes",
+            "1",  # Extract 1 frame
+            "-q:v",
+            "2",  # High quality
+            "-y",  # Overwrite output file
+            thumbnail_path,
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            logger.info(f"Thumbnail generated successfully: {thumbnail_path}")
+            return True
+        else:
+            logger.error(f"ffmpeg error: {result.stderr}")
+            return False
+    except Exception as e:
+        logger.error(f"Error generating thumbnail: {e}")
+        return False
 
 
 def download_and_upload(download_id: str, url: str, title: str):
@@ -152,6 +184,12 @@ def download_and_upload(download_id: str, url: str, title: str):
             file_extension = downloaded_file.suffix
             s3_object_name = f"{download_id}{file_extension}"
 
+            # Generate thumbnail
+            thumbnail_path = Path(temp_dir) / f"{download_id}_thumbnail.jpg"
+            thumbnail_generated = generate_thumbnail(
+                str(downloaded_file), str(thumbnail_path)
+            )
+
             # Upload to S3
             downloads[download_id].update({"status": "uploading", "progress": 100.0})
 
@@ -169,6 +207,7 @@ def download_and_upload(download_id: str, url: str, title: str):
                     }
                 )
 
+                # Upload video file
                 minio_client.fput_object(
                     MINIO_BUCKET,
                     s3_object_name,
@@ -178,6 +217,19 @@ def download_and_upload(download_id: str, url: str, title: str):
                     else "video/mp4",
                     tags=tags,
                 )
+
+                # Upload thumbnail if generated successfully
+                thumbnail_object_name = None
+                if thumbnail_generated and thumbnail_path.exists():
+                    thumbnail_object_name = f"{download_id}_thumbnail.jpg"
+                    minio_client.fput_object(
+                        MINIO_BUCKET,
+                        thumbnail_object_name,
+                        str(thumbnail_path),
+                        content_type="image/jpeg",
+                        tags=tags,
+                    )
+                    logger.info(f"Thumbnail uploaded: {thumbnail_object_name}")
 
                 # Update final status
                 downloads[download_id].update(
@@ -220,6 +272,7 @@ async def start_download(request: DownloadRequest, background_tasks: BackgroundT
         "eta": None,
         "error": None,
         "s3_object_name": None,
+        "thumbnail_url": None,
     }
 
     async with downloads_lock:
@@ -243,9 +296,21 @@ async def list_downloads():
     if minio_client:
         try:
             objects = minio_client.list_objects(MINIO_BUCKET, recursive=True)
-            for obj in objects:
-                download_id = Path(obj.object_name).stem
+            video_objects = {}
+            thumbnail_objects = {}
 
+            # Separate video and thumbnail objects
+            for obj in objects:
+                obj_name = obj.object_name
+                if obj_name.endswith("_thumbnail.jpg"):
+                    download_id = obj_name.replace("_thumbnail.jpg", "")
+                    thumbnail_objects[download_id] = obj
+                else:
+                    download_id = Path(obj_name).stem
+                    video_objects[download_id] = obj
+
+            # Process video objects and add thumbnail URLs
+            for download_id, obj in video_objects.items():
                 tags = minio_client.get_object_tags(MINIO_BUCKET, obj.object_name)
 
                 if tags:
@@ -267,6 +332,18 @@ async def list_downloads():
                     url = "Unknown URL"
                     created_at = obj.last_modified.isoformat()
 
+                # Generate thumbnail presigned URL if thumbnail exists (10 minutes expiry)
+                thumbnail_url = None
+                if download_id in thumbnail_objects:
+                    try:
+                        thumbnail_url = minio_client.presigned_get_object(
+                            MINIO_BUCKET,
+                            f"{download_id}_thumbnail.jpg",
+                            expires=timedelta(minutes=10),
+                        )
+                    except S3Error as e:
+                        logger.error(f"Error generating thumbnail presigned URL: {e}")
+
                 all_downloads[download_id] = DownloadResponse(
                     download_id=download_id,
                     url=url,
@@ -277,6 +354,7 @@ async def list_downloads():
                     file_size=obj.size,
                     downloaded_size=obj.size,
                     s3_object_name=obj.object_name,
+                    thumbnail_url=thumbnail_url,
                 )
         except S3Error as e:
             logger.error(f"Error listing S3 objects: {e}")
@@ -284,7 +362,24 @@ async def list_downloads():
     # 2. Get in-memory downloads and overwrite/add to the list
     async with downloads_lock:
         for did, d_record in downloads.items():
-            all_downloads[did] = DownloadResponse(**d_record)
+            # For in-memory downloads, also try to generate thumbnail URL if completed
+            thumbnail_url = None
+            if d_record.get("status") == "completed" and minio_client:
+                try:
+                    # Check if thumbnail exists
+                    minio_client.stat_object(MINIO_BUCKET, f"{did}_thumbnail.jpg")
+                    thumbnail_url = minio_client.presigned_get_object(
+                        MINIO_BUCKET,
+                        f"{did}_thumbnail.jpg",
+                        expires=timedelta(minutes=10),
+                    )
+                except S3Error:
+                    # Thumbnail doesn't exist, ignore
+                    pass
+
+            d_record_copy = d_record.copy()
+            d_record_copy["thumbnail_url"] = thumbnail_url
+            all_downloads[did] = DownloadResponse(**d_record_copy)
 
     # 3. Sort and return
     download_list = sorted(
