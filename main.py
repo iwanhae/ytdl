@@ -126,7 +126,7 @@ def download_and_upload(download_id: str, url: str, title: str):
 
             # Configure yt-dlp options
             ydl_opts = {
-                "format": "bestvideo*+bestaudio/best",
+                "format": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
                 "outtmpl": str(output_path),
                 "progress_hooks": [DownloadProgress(download_id)],
                 "no_warnings": True,
