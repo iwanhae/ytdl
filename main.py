@@ -305,19 +305,106 @@ async def encoding_worker():
                     MINIO_BUCKET, s3_object_name, str(original_video_path)
                 )
 
+                # Get metadata from downloads record
+                async with downloads_lock:
+                    download_record = downloads.get(download_id, {})
+                    video_title = download_record.get("title", "Unknown")
+                    video_url = download_record.get("url", "Unknown")
+                    download_time = download_record.get("created_at", "Unknown")
+
                 # 2. Encode to AAC
                 aac_filename = f"{download_id}.encoded.aac"
                 aac_path = temp_dir_path / aac_filename
+
+                # Create description with download time and original URL
+                description = f"Downloaded: {download_time}, Original URL: {video_url}"
+
+                # Download existing thumbnail from S3 for album art
+                thumbnail_for_aac_path = temp_dir_path / f"{download_id}.thumbnail.jpg"
+                thumbnail_object_name = f"{download_id}.thumbnail.jpg"
+                thumbnail_available = False
+
+                try:
+                    logger.info(
+                        f"Downloading existing thumbnail from S3 for {download_id}"
+                    )
+                    minio_client.fget_object(
+                        MINIO_BUCKET, thumbnail_object_name, str(thumbnail_for_aac_path)
+                    )
+                    thumbnail_available = thumbnail_for_aac_path.exists()
+                    logger.info(f"Successfully downloaded thumbnail for AAC album art")
+                except Exception as e:
+                    logger.warning(f"Failed to download thumbnail from S3: {e}")
+                    thumbnail_available = False
+
+                # Build FFmpeg command for AAC encoding with optional album art
                 ffmpeg_aac_cmd = [
                     "ffmpeg",
                     "-i",
                     str(original_video_path),
-                    "-vn",
-                    "-c:a",
-                    "aac",
-                    "-y",
-                    str(aac_path),
                 ]
+
+                # Add thumbnail as input if available
+                if thumbnail_available:
+                    ffmpeg_aac_cmd.extend(["-i", str(thumbnail_for_aac_path)])
+
+                ffmpeg_aac_cmd.extend(
+                    [
+                        "-vn",  # No video
+                        "-c:a",
+                        "aac",
+                        "-id3v2_version",
+                        "4",  # Use ID3v2.4
+                    ]
+                )
+
+                # Map audio and optionally album art
+                if thumbnail_available:
+                    ffmpeg_aac_cmd.extend(
+                        [
+                            "-map",
+                            "0:a:0",  # Audio from first input (video)
+                            "-map",
+                            "1:0",  # Image from second input (thumbnail)
+                            "-c:v",
+                            "mjpeg",  # Codec for album art
+                            "-disposition:v",
+                            "attached_pic",  # Mark as album art
+                        ]
+                    )
+
+                # Extract date from created_at for ID3v2.4 TDRC tag
+                try:
+                    if download_time != "Unknown":
+                        dt = datetime.fromisoformat(
+                            download_time.replace("Z", "+00:00")
+                        )
+                        date_tag = dt.strftime("%Y-%m-%d")
+                    else:
+                        date_tag = datetime.now().strftime("%Y-%m-%d")
+                except:
+                    date_tag = datetime.now().strftime("%Y-%m-%d")
+
+                # Add metadata to AAC file
+                ffmpeg_aac_cmd.extend(
+                    [
+                        "-metadata",
+                        f"title={video_title}",  # TIT2: Title
+                        "-metadata",
+                        "artist=YTDL",  # TPE1: Artist
+                        "-metadata",
+                        "album=Downloaded Videos",  # TALB: Album
+                        "-metadata",
+                        f"date={date_tag}",  # TDRC: Recording time
+                        "-metadata",
+                        f"comment={description}",  # COMM: Comments
+                        "-metadata",
+                        "genre=Downloaded",  # TCON: Content type
+                        "-y",
+                        str(aac_path),
+                    ]
+                )
+
                 logger.info(f"Starting AAC encoding for {download_id}")
                 result = await asyncio.to_thread(
                     subprocess.run, ffmpeg_aac_cmd, text=True
