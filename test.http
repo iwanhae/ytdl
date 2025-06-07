@@ -1,0 +1,6 @@
+POST http://127.0.0.1:8000/download
+Content-Type: application/json
+
+{
+    "url": "https://www.youtube.com/watch?v=gq0C6-Qu1eQ"
+}
