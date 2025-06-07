@@ -332,6 +332,13 @@ async def encoding_worker():
                 )
                 logger.info(f"Uploaded {aac_filename} to S3")
 
+                async with downloads_lock:
+                    downloads[download_id].update(
+                        {
+                            "encoding_status": "aac_completed",
+                            "s3_aac_object_name": aac_filename,
+                        }
+                    )
                 # 3. Encode to WebM
                 webm_filename = f"{download_id}.encoded.webm"
                 webm_path = temp_dir_path / webm_filename
@@ -339,16 +346,8 @@ async def encoding_worker():
                     "ffmpeg",
                     "-i",
                     str(original_video_path),
-                    "-c:v",
-                    "libvpx-vp9",
-                    "-crf",
-                    "30",
-                    "-b:v",
-                    "0",
-                    "-c:a",
-                    "libopus",
-                    "-b:a",
-                    "128k",
+                    "-vf",
+                    "scale=-1:720",
                     "-y",
                     str(webm_path),
                 ]
