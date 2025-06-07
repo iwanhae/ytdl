@@ -437,7 +437,7 @@ async def get_download(download_id: str):
                 signed_url = minio_client.presigned_get_object(
                     MINIO_BUCKET,
                     s3_object_name,
-                    expires=timedelta(hours=1),  # Make it valid for 1 hour
+                    expires=timedelta(hours=12),  # Make it valid for 12 hour
                 )
                 return RedirectResponse(url=signed_url)
             except S3Error as e:
