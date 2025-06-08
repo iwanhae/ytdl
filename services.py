@@ -451,7 +451,7 @@ class VideoService:
             "-i",
             str(original_video_path),
             "-vf",
-            "scale=-1:720",
+            "scale=-1:480",
             "-y",
             str(webm_path),
         ]
