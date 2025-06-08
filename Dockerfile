@@ -8,4 +8,4 @@ COPY . .
 RUN uv sync --locked
 
 EXPOSE 8000
-CMD ["uv", "run", "python", "main.py"]
+CMD ["uv", "run", "main.py"]

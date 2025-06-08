@@ -5,7 +5,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 
-from models import DownloadRequest, DownloadListResponse, ScanResponse
+from models import (
+    DownloadRequest,
+    DownloadListResponse,
+    ScanResponse,
+    WebMEncodeResponse,
+)
 from services import S3Service, VideoService
 
 # Configure logging
@@ -94,6 +99,27 @@ async def trigger_scan_and_encode():
         message="Scan complete. See /downloads for status.",
         queued_count=queued_count,
     )
+
+
+@app.post("/encode/webm/{download_id}", response_model=WebMEncodeResponse)
+async def trigger_webm_encode(download_id: str):
+    """
+    Manually triggers WebM encoding for a specific download.
+    """
+    success = await video_service.queue_webm_encoding(download_id)
+
+    if success:
+        return WebMEncodeResponse(
+            message="WebM encoding queued successfully",
+            download_id=download_id,
+            success=True,
+        )
+    else:
+        return WebMEncodeResponse(
+            message="Failed to queue WebM encoding (already encoding, already has WebM, or download not found)",
+            download_id=download_id,
+            success=False,
+        )
 
 
 @app.get("/")

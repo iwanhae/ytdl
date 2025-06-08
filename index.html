@@ -231,6 +231,7 @@
       align-items: center;
       gap: 8px;
       flex-shrink: 0;
+      flex-wrap: wrap;
     }
 
     .status-badge {
@@ -265,6 +266,11 @@
     .status-error {
       background: rgba(244, 33, 46, 0.2);
       color: #f4212e;
+    }
+
+    .status-webm_encoding {
+      background: rgba(128, 90, 213, 0.2);
+      color: #805ad5;
     }
 
     .progress-bar {
@@ -740,6 +746,29 @@
       }
     }
 
+    // Encode to WebM
+    async function encodeToWebM(downloadId) {
+      try {
+        const response = await fetch(`${API_BASE}/encode/webm/${downloadId}`, {
+          method: 'POST',
+        });
+
+        if (response.ok) {
+          const result = await response.json();
+          if (result.success) {
+            showToast('WebM 인코딩이 시작되었습니다!', 'success');
+          } else {
+            showToast(result.message, 'info');
+          }
+          loadDownloads();
+        } else {
+          throw new Error('WebM 인코딩 시작 실패');
+        }
+      } catch (error) {
+        showToast('WebM 인코딩 시작에 실패했습니다: ' + error.message, 'error');
+      }
+    }
+
     // Load downloads
     async function loadDownloads() {
       try {
@@ -784,7 +813,9 @@
             <div class="download-status">
               <span class="status-badge status-${download.status}">${getStatusText(download.status)}</span>
               ${download.encoding_status ? `<span class="status-badge status-${download.encoding_status}">${getEncodingStatusText(download.encoding_status)}</span>` : ''}
-              <button class="btn btn-danger" onclick="deleteDownload('${download.download_id}')">삭제</button>
+              <div style="display: flex; gap: 8px;">
+                <button class="btn btn-danger" onclick="deleteDownload('${download.download_id}')">삭제</button>
+              </div>
             </div>
           </div>
           
@@ -833,6 +864,8 @@
             <div class="download-links">
               ${download.original_video_url ? `<a href="${download.original_video_url}" class="download-link" download>원본</a>` : ''}
               ${download.mp3_url ? `<a href="${download.mp3_url}" class="download-link" download>오디오 (mp3)</a>` : ''}
+              ${download.status === 'completed' && !download.webm_url && !['encoding', 'webm_encoding'].includes(download.encoding_status) ?
+            `<button class="btn" style="padding: 6px 12px; font-size: 13px; width: auto;" onclick="encodeToWebM('${download.download_id}')">WebM 인코딩</button>` : ''}
               ${download.webm_url ? `<a href="${download.webm_url}" class="download-link" download>비디오 (WebM)</a>` : ''}
             </div>
           ` : ''}
@@ -869,6 +902,8 @@
       const statusMap = {
         'queued': '대기',
         'encoding': '인코딩',
+        'mp3_completed': 'MP3 완료',
+        'webm_encoding': 'WebM 인코딩',
         'completed': '완료',
         'error': '오류'
       };

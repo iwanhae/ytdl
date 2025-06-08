@@ -36,6 +36,12 @@ class ScanResponse(BaseModel):
     queued_count: int
 
 
+class WebMEncodeResponse(BaseModel):
+    message: str
+    download_id: str
+    success: bool
+
+
 class DownloadState(BaseModel):
     """Internal model for tracking download state"""
 
@@ -52,7 +58,7 @@ class DownloadState(BaseModel):
     error: Optional[str] = None
     s3_object_name: Optional[str] = None
     encoding_status: Optional[str] = (
-        None  # "queued", "encoding", "mp3_completed", "completed", "error"
+        None  # "queued", "encoding", "mp3_completed", "webm_encoding", "completed", "error"
     )
     s3_mp3_object_name: Optional[str] = None
     s3_webm_object_name: Optional[str] = None

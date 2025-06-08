@@ -228,12 +228,16 @@ class VideoService:
         self.downloads: Dict[str, DownloadState] = {}
         self.downloads_lock = asyncio.Lock()
         self.encoding_queue = asyncio.Queue()
+        self.webm_queue = asyncio.Queue()
         self._encoding_worker_task = None
+        self._webm_worker_task = None
 
     async def start_encoding_worker(self):
-        """Start the encoding worker task"""
+        """Start the encoding worker tasks"""
         if self._encoding_worker_task is None:
             self._encoding_worker_task = asyncio.create_task(self._encoding_worker())
+        if self._webm_worker_task is None:
+            self._webm_worker_task = asyncio.create_task(self._webm_worker())
 
     async def _encoding_worker(self):
         """Worker to process video encoding tasks from a queue"""
@@ -257,8 +261,38 @@ class VideoService:
             finally:
                 self.encoding_queue.task_done()
 
+    async def _webm_worker(self):
+        """Worker to process WebM encoding tasks from a queue"""
+        while True:
+            try:
+                download_id, s3_object_name = await self.webm_queue.get()
+                logger.info(
+                    f"Starting WebM encoding for {download_id} ({s3_object_name})"
+                )
+
+                async with self.downloads_lock:
+                    if download_id in self.downloads:
+                        # Set status to indicate WebM encoding is in progress
+                        if self.downloads[download_id].encoding_status == "completed":
+                            self.downloads[
+                                download_id
+                            ].encoding_status = "webm_encoding"
+                        else:
+                            self.downloads[download_id].encoding_status = "encoding"
+
+                await self._encode_video_to_webm(download_id, s3_object_name)
+
+            except Exception as e:
+                logger.error(f"Error in WebM encoding worker: {e}")
+                async with self.downloads_lock:
+                    if download_id in self.downloads:
+                        self.downloads[download_id].encoding_status = "error"
+                        self.downloads[download_id].error = str(e)
+            finally:
+                self.webm_queue.task_done()
+
     async def _encode_video(self, download_id: str, s3_object_name: str):
-        """Encode a video to MP3 and WebM formats"""
+        """Encode a video to MP3 format only"""
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_dir_path = Path(temp_dir)
             original_video_path = temp_dir_path / s3_object_name
@@ -281,7 +315,7 @@ class VideoService:
                     video_url = "Unknown"
                     download_time = "Unknown"
 
-            # Encode to MP3
+            # Encode to MP3 only
             await self._encode_to_mp3(
                 download_id,
                 original_video_path,
@@ -290,6 +324,25 @@ class VideoService:
                 video_url,
                 download_time,
             )
+
+            async with self.downloads_lock:
+                if download_id in self.downloads:
+                    self.downloads[download_id].encoding_status = "completed"
+                    self.downloads[
+                        download_id
+                    ].s3_mp3_object_name = f"{download_id}.encoded.mp3"
+
+    async def _encode_video_to_webm(self, download_id: str, s3_object_name: str):
+        """Encode a video to WebM format"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_dir_path = Path(temp_dir)
+            original_video_path = temp_dir_path / s3_object_name
+
+            # Download original video
+            if not self.s3_service.download_file(
+                s3_object_name, str(original_video_path)
+            ):
+                raise Exception(f"Failed to download {s3_object_name}")
 
             # Encode to WebM
             await self._encode_to_webm(download_id, original_video_path, temp_dir_path)
@@ -384,7 +437,6 @@ class VideoService:
 
         async with self.downloads_lock:
             if download_id in self.downloads:
-                self.downloads[download_id].encoding_status = "mp3_completed"
                 self.downloads[download_id].s3_mp3_object_name = mp3_filename
 
     async def _encode_to_webm(
@@ -731,6 +783,96 @@ class VideoService:
                         queued_count += 1
 
         return queued_count
+
+    async def queue_webm_encoding(self, download_id: str) -> bool:
+        """Queue a download for WebM encoding"""
+        async with self.downloads_lock:
+            # Check if download exists in memory
+            if download_id in self.downloads:
+                download_state = self.downloads[download_id]
+                if (
+                    download_state.s3_object_name
+                    and download_state.status == "completed"
+                ):
+                    # Check if already encoding or already has WebM
+                    if download_state.encoding_status in ["encoding", "webm_encoding"]:
+                        return False  # Already encoding
+                    if download_state.s3_webm_object_name:
+                        return False  # Already has WebM
+
+                    await self.webm_queue.put(
+                        (download_id, download_state.s3_object_name)
+                    )
+                    return True
+                return False
+
+            # Check if download exists in S3
+            s3_objects = self.s3_service.get_all_download_objects()
+            if download_id in s3_objects:
+                obj_info = s3_objects[download_id]
+                if obj_info.original and not obj_info.webm:
+                    # Create a temporary download state for tracking
+                    metadata = self.s3_service.get_object_metadata(obj_info.original)
+                    download_state = DownloadState(
+                        download_id=download_id,
+                        url=metadata.get("url", "N/A (from S3)"),
+                        title=metadata.get("title", "N/A (from S3)"),
+                        status="completed",
+                        created_at=metadata.get(
+                            "created_at", datetime.now().isoformat()
+                        ),
+                        progress=100.0,
+                        s3_object_name=obj_info.original,
+                        encoding_status="queued",
+                        s3_mp3_object_name=f"{download_id}.encoded.mp3",
+                    )
+                    self.downloads[download_id] = download_state
+
+                    await self.webm_queue.put((download_id, obj_info.original))
+                    return True
+
+            return False
+
+    class DownloadProgress:
+        """Async progress callback for yt-dlp"""
+
+        def __init__(self, video_service: "VideoService", download_id: str):
+            self.video_service = video_service
+            self.download_id = download_id
+
+        def __call__(self, d):
+            if d["status"] == "downloading":
+                total_bytes = d.get("total_bytes") or d.get("total_bytes_estimate")
+                downloaded_bytes = d.get("downloaded_bytes", 0)
+
+                if total_bytes:
+                    progress = (downloaded_bytes / total_bytes) * 100
+                else:
+                    progress = 0.0
+
+                # Create a task to update the progress asynchronously
+                asyncio.create_task(
+                    self._update_progress_async(
+                        progress=progress,
+                        file_size=int(total_bytes) if total_bytes is not None else None,
+                        downloaded_size=downloaded_bytes,
+                        speed=d.get("speed_str"),
+                        eta=d.get("eta_str"),
+                    )
+                )
+            elif d["status"] == "finished":
+                asyncio.create_task(
+                    self._update_progress_async(progress=100.0, status="uploading")
+                )
+            elif d["status"] == "error":
+                asyncio.create_task(
+                    self._update_progress_async(
+                        status="error", error=str(d.get("error", "Unknown error"))
+                    )
+                )
+
+        async def _update_progress_async(self, **kwargs):
+            await self.video_service._update_download_state(self.download_id, **kwargs)
 
     class DownloadProgressSync:
         """Synchronous progress callback for yt-dlp when running in BackgroundTasks"""
