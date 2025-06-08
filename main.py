@@ -820,15 +820,8 @@ async def delete_download(download_id: str):
                 DeleteObject(f"{download_id}.encoded.webm"),
             ]
             errors = minio_client.remove_objects(MINIO_BUCKET, objects_to_delete)
-            deleted_files, error_files = [], []
             for e in errors:
-                error_files.append(e.object_name)
-            for d in objects_to_delete:
-                if d.object_name not in error_files:
-                    deleted_files.append(d.object_name)
-            logger.info(f"Deleted S3 objects: {deleted_files}")
-            if error_files:
-                logger.error(f"Errors deleting S3 objects: {error_files}")
+                logger.error(f"Errors deleting S3 objects: {e.name}")
         except S3Error as e:
             logger.error(f"Error deleting S3 objects: {e}")
             raise HTTPException(
